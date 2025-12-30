@@ -177,6 +177,16 @@ io.on('connection', (socket) => {
     });
   });
 
+  // --- 5. INICIAR DEBATE (NUEVO) ---
+  socket.on('start_debate', ({ roomCode }) => {
+    const code = roomCode?.toUpperCase();
+    
+    // Avisar a TODOS en la sala (incluido el host) que cambien de pantalla
+    io.to(code).emit('debate_started');
+    
+    console.log(`🗣️ Debate iniciado en sala ${code}`);
+  });
+
   // --- 4. DESCONEXIÓN ---
   socket.on('disconnect', () => {
     // Buscar en qué sala estaba el socket desconectado
