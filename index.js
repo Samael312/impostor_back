@@ -2,7 +2,8 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-// Asegúrate de que tu archivo dictionaries exporte esto correctamente
+
+// --- IMPORTANTE: Asegúrate de que la carpeta 'data' y el archivo 'dictionaries.js' estén en GitHub ---
 const { getRandomword, DICTIONARIES } = require('./data/dictionaries'); 
 
 const app = express();
@@ -10,9 +11,12 @@ app.use(cors());
 
 const server = http.createServer(app);
 
+// --- CONFIGURACIÓN PARA RENDER ---
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:5173", 
+    // "*" permite que cualquiera se conecte (útil para pruebas iniciales).
+    // Cuando tengas tu frontend en Vercel, cambia "*" por ["https://tu-app.vercel.app", "http://localhost:5173"]
+    origin: "*", 
     methods: ["GET", "POST"]
   }
 });
@@ -52,7 +56,7 @@ io.on('connection', (socket) => {
       config: {
         maxPlayers: settings.maxPlayers || 10,
         allowedCategories: settings.categories || ['random'],
-        // NUEVO: Guardamos cuántos impostores quiere el host
+        // Guardamos cuántos impostores quiere el host
         impostorCount: settings.impostorCount || 1 
       }
     };
@@ -117,7 +121,7 @@ io.on('connection', (socket) => {
 
     if (!room || room.hostId !== socket.id) return;
     
-    // Validación mínima de jugadores (3 es lo normal, pero puedes bajarlo para pruebas)
+    // Validación mínima de jugadores
     if (room.players.length < 3) { 
         socket.emit('error_message', 'Mínimo 3 jugadores para empezar.');
         return;
@@ -127,41 +131,38 @@ io.on('connection', (socket) => {
     const availableCategories = room.config.allowedCategories;
     const randomCatKey = availableCategories[Math.floor(Math.random() * availableCategories.length)];
     
-    // (Asegúrate de que getRandomword devuelva { word, category })
     const { word, category } = getRandomword(randomCatKey);
 
-    // B. SELECCIONAR IMPOSTORES (NUEVA LÓGICA)
+    // B. SELECCIONAR IMPOSTORES
     const totalPlayers = room.players.length;
-    // Recuperamos la configuración, o usamos 1 por defecto
     let count = room.config.impostorCount || 1;
 
-    // Seguridad: Que los impostores no sean más de la mitad (por si acaso falla el frontend)
+    // Seguridad: Que los impostores no sean más de la mitad
     const maxAllowed = Math.floor((totalPlayers - 1) / 2) || 1; 
     if (count > maxAllowed) count = maxAllowed;
 
-    // Algoritmo de mezcla (Shuffle) para elegir N jugadores al azar
+    // Algoritmo de mezcla (Shuffle)
     const shuffledIds = room.players.map(p => p.id).sort(() => 0.5 - Math.random());
-    const selectedImpostorIds = shuffledIds.slice(0, count); // Tomamos los primeros N IDs
+    const selectedImpostorIds = shuffledIds.slice(0, count);
 
     room.gameStarted = true;
     room.word = word;       
-    room.impostorIds = selectedImpostorIds; // Guardamos ARRAY de IDs, no solo uno
+    room.impostorIds = selectedImpostorIds;
     room.categoryPlayed = category; 
 
     console.log(`🎮 Partida en ${code} | Tema: ${category} | Impostores: ${count}`);
 
     // C. ENVIAR ROLES A CADA JUGADOR
     room.players.forEach(player => {
-      // Verificamos si este jugador está en la lista de impostores seleccionados
       const isImpostor = selectedImpostorIds.includes(player.id);
       
       const secretPayload = {
         gameStarted: true,
-        role: isImpostor ? 'impostor' : 'civil', // Usamos 'civil' o 'jugador' según prefieras
+        role: isImpostor ? 'impostor' : 'civil',
         word: isImpostor ? '???' : word,
         category: category,
         players: room.players,
-        impostorCount: count // Opcional: Avisar a todos cuántos impostores hay
+        impostorCount: count 
       };
       
       io.to(player.id).emit('game_started', secretPayload);
@@ -192,6 +193,8 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(3001, () => {
-  console.log('🚀 BACKEND CORRIENDO EN PUERTO 3001');
+// --- AJUSTE DE PUERTO PARA RENDER ---
+const PORT = process.env.PORT || 3001; // Render inyecta el puerto aquí
+server.listen(PORT, () => {
+  console.log(`🚀 BACKEND CORRIENDO EN PUERTO ${PORT}`);
 });
