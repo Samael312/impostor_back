@@ -39,7 +39,6 @@ io.on('connection', (socket) => {
   socket.on('create_room', ({ nickname, avatarConfig, settings }) => {
     const roomCode = generateRoomCode();
     
-    // Configuraciones por defecto si fallan los settings
     const maxPlayers = settings?.maxPlayers || 8;
     const impostorCount = settings?.impostorCount || 1;
     const categories = settings?.categories || ['random'];
@@ -81,6 +80,7 @@ io.on('connection', (socket) => {
       socket.emit('error_message', 'La sala no existe ❌');
       return;
     }
+    // Si la partida ya empezó, no dejamos entrar (o podrías manejar reconexión aquí)
     if (rooms[code].gameStarted) {
       socket.emit('error_message', 'La partida ya empezó 🚫');
       return;
@@ -91,7 +91,6 @@ io.on('connection', (socket) => {
         return;
     }
 
-    // Verificar si el nombre ya existe en la sala (opcional, pero recomendado)
     const nameExists = rooms[code].players.some(p => p.name === nickname);
     const safeName = nameExists ? `${nickname} (2)` : nickname;
 
@@ -106,10 +105,7 @@ io.on('connection', (socket) => {
     rooms[code].players.push(newPlayer);
     socket.join(code);
 
-    // Actualizar a todos en la sala
     io.to(code).emit('update_players', rooms[code].players);
-    
-    // Confirmar al usuario que se unió
     socket.emit('room_joined', { roomCode: code, players: rooms[code].players });
 
     console.log(`👋 ${nickname} entró a ${code}`);
@@ -122,17 +118,13 @@ io.on('connection', (socket) => {
 
     if (!room || room.hostId !== socket.id) return;
     
-    // Validación mínima (puedes cambiar a 3 para producción)
     if (room.players.length < 3) { 
         socket.emit('error_message', 'Se necesitan mínimo 3 jugadores.');
         return;
     }
 
     // A. SELECCIONAR PALABRA
-    // Si hay varias categorías seleccionadas, elegimos una al azar de la lista permitida
     const availableCats = room.config.allowedCategories; 
-    // Si availableCats tiene "random" o es vacio, getRandomWord maneja la lógica interna
-    // Pero si el usuario eligió ["animales", "cosas"], elegimos una de esas dos primero
     let categoryToUse = 'random';
     if (availableCats.length > 0 && !availableCats.includes('random')) {
         categoryToUse = availableCats[Math.floor(Math.random() * availableCats.length)];
@@ -144,12 +136,10 @@ io.on('connection', (socket) => {
     const totalPlayers = room.players.length;
     let desiredImpostors = room.config.impostorCount;
 
-    // Calcular máximo seguro (si hay 4 jugadores, máx 1 impostor. Si hay 7, máx 3).
     const maxImpostors = Math.floor((totalPlayers - 1) / 2);
     if (desiredImpostors > maxImpostors) desiredImpostors = maxImpostors;
     if (desiredImpostors < 1) desiredImpostors = 1;
 
-    // Mezclar jugadores y tomar los N primeros como impostores
     const shuffledIds = room.players.map(p => p.id).sort(() => 0.5 - Math.random());
     const selectedImpostorIds = shuffledIds.slice(0, desiredImpostors);
 
@@ -165,8 +155,7 @@ io.on('connection', (socket) => {
       
       const secretPayload = {
         gameStarted: true,
-        role: isImpostor ? 'impostor' : 'juagador',
-        // IMPORTANTE: Enviamos 'word' bajo la clave 'location' para compatibilidad con Game.jsx
+        role: isImpostor ? 'impostor' : 'jugador', // Corregido typo 'juagador'
         location: isImpostor ? '???' : word, 
         category: category,
         players: room.players,
@@ -177,48 +166,49 @@ io.on('connection', (socket) => {
     });
   });
 
-  // --- 5. INICIAR DEBATE (NUEVO) ---
+  // --- 5. INICIAR DEBATE (VERSIÓN ROBUSTA) ---
   socket.on('start_debate', ({ roomCode }) => {
     const code = roomCode?.toUpperCase();
-    
-    // Avisar a TODOS en la sala (incluido el host) que cambien de pantalla
-    io.to(code).emit('debate_started');
-    
-    console.log(`🗣️ Debate iniciado en sala ${code}`);
+    const room = rooms[code];
+
+    if (room && room.players) {
+        // Enviar a cada jugador individualmente para asegurar que llegue a todos
+        room.players.forEach(player => {
+            io.to(player.id).emit('debate_started');
+        });
+        console.log(`🗣️ Debate iniciado en sala ${code} (Enviado a ${room.players.length} jugadores)`);
+    } else {
+        // Fallback
+        io.to(code).emit('debate_started');
+    }
   });
 
   // --- 4. DESCONEXIÓN ---
   socket.on('disconnect', () => {
-    // Buscar en qué sala estaba el socket desconectado
     for (const code in rooms) {
       const room = rooms[code];
       const index = room.players.findIndex(p => p.id === socket.id);
       
       if (index !== -1) {
         const wasHost = room.players[index].isHost;
-        room.players.splice(index, 1); // Quitar jugador
+        room.players.splice(index, 1);
 
-        // Si la sala se queda vacía, borrarla
         if (room.players.length === 0) {
           delete rooms[code];
           console.log(`🗑️ Sala ${code} eliminada (vacía)`);
         } else {
-          // Si se fue el host, asignar nuevo host al siguiente jugador
           if (wasHost) {
              room.players[0].isHost = true;
              room.hostId = room.players[0].id;
           }
-          // Avisar a los demás
           io.to(code).emit('update_players', room.players);
         }
-        break; // Salir del loop una vez encontrado
+        break;
       }
     }
   });
 
-  // Opcional: Manejo explícito de 'salir de la partida' desde el frontend
   socket.on('disconnect_game', () => {
-    // Reutilizamos la lógica de desconexión forzando el evento
     socket.disconnect(); 
   });
 });
