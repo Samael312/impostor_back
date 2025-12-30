@@ -32,11 +32,19 @@ const DICTIONARIES = {
   ],
 
   objetos: [
-    "iPhone", "AirPods", "PlayStation",
-    "Xbox", "Nintendo Switch", "Laptop",
-    "Audífonos Bluetooth", "Smartwatch",
-    "Cámara GoPro", "Tablet", "Kindle"
-  ],
+  "Llaves", "Cartera", "Mochila",
+  "Cuaderno", "Bolígrafo", "Lápiz",
+  "Celular", "Cargador", "Audífonos",
+  "Botella de Agua", "Vaso", "Plato",
+  "Control Remoto", "Televisor",
+  "Silla", "Mesa", "Cama",
+  "Almohada", "Cobija",
+  "Cepillo de Dientes", "Pasta Dental",
+  "Peine", "Espejo",
+  "Reloj", "Gafas",
+  "Zapatos", "Sandalias",
+  "Chaqueta", "Gorra"
+],
 
   comida_internacional: [
     "Pizza", "Hamburguesa", "Sushi",
