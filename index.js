@@ -3,27 +3,25 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 
-// --- IMPORTANTE: Asegúrate de que la carpeta 'data' y el archivo 'dictionaries.js' estén en GitHub ---
-const {  DICTIONARIES, getRandomWord } = require('./data/dictionaries'); 
+// Asegúrate de que este archivo existe y exporta { getRandomWord }
+const { getRandomWord } = require('./data/dictionaries'); 
 
 const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
 
-// --- CONFIGURACIÓN PARA RENDER ---
+// --- CONFIGURACIÓN SOCKET.IO ---
 const io = new Server(server, {
   cors: {
-    // "*" permite que cualquiera se conecte (útil para pruebas iniciales).
-    // Cuando tengas tu frontend en Vercel, cambia "*" por ["https://tu-app.vercel.app", "http://localhost:5173"]
+    // En producción (Vercel), cambia "*" por la URL de tu frontend
     origin: "*", 
     methods: ["GET", "POST"]
   }
 });
 
-// VARIABLES GLOBALES
+// ALMACÉN EN MEMORIA (Volátil: se borra si reinicias el servidor)
 const rooms = {}; 
-let userCounter = 0; 
 
 const generateRoomCode = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -35,35 +33,31 @@ const generateRoomCode = () => {
 };
 
 io.on('connection', (socket) => {
-  // --- 1. LOG PERSONALIZADO ---
-  userCounter++;
-  const randomId = Math.random().toString(36).substr(2, 5); 
-  const customLogId = `Usuario${userCounter}_${randomId}`;
-  
-  socket.customLogId = customLogId; 
-  console.log(`🟢 Conectado: ${customLogId}`);
+  console.log(`🟢 Conexión: ${socket.id}`);
 
-  // --- 2. CREAR SALA (Con Configuración de Impostores) ---
+  // --- 1. CREAR SALA ---
   socket.on('create_room', ({ nickname, avatarConfig, settings }) => {
     const roomCode = generateRoomCode();
     
-    // settings trae: { categories, maxPlayers, impostorCount }
-    
+    // Configuraciones por defecto si fallan los settings
+    const maxPlayers = settings?.maxPlayers || 8;
+    const impostorCount = settings?.impostorCount || 1;
+    const categories = settings?.categories || ['random'];
+
     rooms[roomCode] = {
       players: [],
       gameStarted: false,
       hostId: socket.id,
       config: {
-        maxPlayers: settings.maxPlayers || 10,
-        allowedCategories: settings.categories || ['random'],
-        // Guardamos cuántos impostores quiere el host
-        impostorCount: settings.impostorCount || 1 
+        maxPlayers,
+        allowedCategories: categories,
+        impostorCount
       }
     };
 
     const newPlayer = {
       id: socket.id,
-      name: nickname,
+      name: nickname || 'Jugador',
       avatar: avatarConfig,
       isHost: true,
       score: 0
@@ -73,13 +67,13 @@ io.on('connection', (socket) => {
     socket.join(roomCode); 
 
     socket.emit('room_created', { 
-        roomCode: roomCode,
+        roomCode,
         players: rooms[roomCode].players
     });
-    console.log(`🏠 Sala ${roomCode} creada (Max: ${settings.maxPlayers}, Impostores: ${settings.impostorCount})`);
+    console.log(`🏠 Sala ${roomCode} creada por ${nickname}`);
   });
 
-  // --- 3. UNIRSE A SALA ---
+  // --- 2. UNIRSE A SALA ---
   socket.on('join_room', ({ roomCode, nickname, avatarConfig }) => {
     const code = roomCode?.toUpperCase();
 
@@ -97,9 +91,13 @@ io.on('connection', (socket) => {
         return;
     }
 
+    // Verificar si el nombre ya existe en la sala (opcional, pero recomendado)
+    const nameExists = rooms[code].players.some(p => p.name === nickname);
+    const safeName = nameExists ? `${nickname} (2)` : nickname;
+
     const newPlayer = {
       id: socket.id,
-      name: nickname,
+      name: safeName,
       avatar: avatarConfig,
       isHost: false,
       score: 0
@@ -108,93 +106,114 @@ io.on('connection', (socket) => {
     rooms[code].players.push(newPlayer);
     socket.join(code);
 
+    // Actualizar a todos en la sala
     io.to(code).emit('update_players', rooms[code].players);
+    
+    // Confirmar al usuario que se unió
     socket.emit('room_joined', { roomCode: code, players: rooms[code].players });
 
-    console.log(`👋 ${customLogId} entró a sala ${code}`);
+    console.log(`👋 ${nickname} entró a ${code}`);
   });
 
-  // --- 4. INICIAR PARTIDA (Lógica Multi-Impostor) ---
+  // --- 3. INICIAR PARTIDA ---
   socket.on('start_game', ({ roomCode }) => {
     const code = roomCode?.toUpperCase();
     const room = rooms[code];
 
     if (!room || room.hostId !== socket.id) return;
     
-    // Validación mínima de jugadores
+    // Validación mínima (puedes cambiar a 3 para producción)
     if (room.players.length < 3) { 
-        socket.emit('error_message', 'Mínimo 3 jugadores para empezar.');
+        socket.emit('error_message', 'Se necesitan mínimo 3 jugadores.');
         return;
     }
 
-    // A. SELECCIONAR TEMA
-    const availableCategories = room.config.allowedCategories;
-    const randomCatKey = availableCategories[Math.floor(Math.random() * availableCategories.length)];
-    
-    const { word, category } = getRandomWord(randomCatKey);
+    // A. SELECCIONAR PALABRA
+    // Si hay varias categorías seleccionadas, elegimos una al azar de la lista permitida
+    const availableCats = room.config.allowedCategories; 
+    // Si availableCats tiene "random" o es vacio, getRandomWord maneja la lógica interna
+    // Pero si el usuario eligió ["animales", "cosas"], elegimos una de esas dos primero
+    let categoryToUse = 'random';
+    if (availableCats.length > 0 && !availableCats.includes('random')) {
+        categoryToUse = availableCats[Math.floor(Math.random() * availableCats.length)];
+    }
+
+    const { word, category } = getRandomWord(categoryToUse);
 
     // B. SELECCIONAR IMPOSTORES
     const totalPlayers = room.players.length;
-    let count = room.config.impostorCount || 1;
+    let desiredImpostors = room.config.impostorCount;
 
-    // Seguridad: Que los impostores no sean más de la mitad
-    const maxAllowed = Math.floor((totalPlayers - 1) / 2) || 1; 
-    if (count > maxAllowed) count = maxAllowed;
+    // Calcular máximo seguro (si hay 4 jugadores, máx 1 impostor. Si hay 7, máx 3).
+    const maxImpostors = Math.floor((totalPlayers - 1) / 2);
+    if (desiredImpostors > maxImpostors) desiredImpostors = maxImpostors;
+    if (desiredImpostors < 1) desiredImpostors = 1;
 
-    // Algoritmo de mezcla (Shuffle)
+    // Mezclar jugadores y tomar los N primeros como impostores
     const shuffledIds = room.players.map(p => p.id).sort(() => 0.5 - Math.random());
-    const selectedImpostorIds = shuffledIds.slice(0, count);
+    const selectedImpostorIds = shuffledIds.slice(0, desiredImpostors);
 
     room.gameStarted = true;
-    room.word = word;       
+    room.currentWord = word;        
     room.impostorIds = selectedImpostorIds;
-    room.categoryPlayed = category; 
 
-    console.log(`🎮 Partida en ${code} | Tema: ${category} | Impostores: ${count}`);
+    console.log(`🎮 Start ${code}: ${word} (${category}) | Impostores: ${desiredImpostors}`);
 
-    // C. ENVIAR ROLES A CADA JUGADOR
+    // C. DISTRIBUIR ROLES
     room.players.forEach(player => {
       const isImpostor = selectedImpostorIds.includes(player.id);
       
       const secretPayload = {
         gameStarted: true,
-        role: isImpostor ? 'impostor' : 'civil',
-        word: isImpostor ? '???' : word,
+        role: isImpostor ? 'impostor' : 'juagador',
+        // IMPORTANTE: Enviamos 'word' bajo la clave 'location' para compatibilidad con Game.jsx
+        location: isImpostor ? '???' : word, 
         category: category,
         players: room.players,
-        impostorCount: count 
+        impostorCount: desiredImpostors 
       };
       
       io.to(player.id).emit('game_started', secretPayload);
     });
   });
-  
-  // --- 5. DESCONEXIÓN ---
+
+  // --- 4. DESCONEXIÓN ---
   socket.on('disconnect', () => {
-    console.log(`🔴 Desconectado: ${socket.customLogId || socket.id}`);
+    // Buscar en qué sala estaba el socket desconectado
     for (const code in rooms) {
       const room = rooms[code];
       const index = room.players.findIndex(p => p.id === socket.id);
       
       if (index !== -1) {
-        room.players.splice(index, 1);
+        const wasHost = room.players[index].isHost;
+        room.players.splice(index, 1); // Quitar jugador
+
+        // Si la sala se queda vacía, borrarla
         if (room.players.length === 0) {
           delete rooms[code];
+          console.log(`🗑️ Sala ${code} eliminada (vacía)`);
         } else {
-          if (room.hostId === socket.id) {
-             room.hostId = room.players[0].id;
+          // Si se fue el host, asignar nuevo host al siguiente jugador
+          if (wasHost) {
              room.players[0].isHost = true;
+             room.hostId = room.players[0].id;
           }
+          // Avisar a los demás
           io.to(code).emit('update_players', room.players);
         }
-        break; 
+        break; // Salir del loop una vez encontrado
       }
     }
   });
+
+  // Opcional: Manejo explícito de 'salir de la partida' desde el frontend
+  socket.on('disconnect_game', () => {
+    // Reutilizamos la lógica de desconexión forzando el evento
+    socket.disconnect(); 
+  });
 });
 
-// --- AJUSTE DE PUERTO PARA RENDER ---
-const PORT = process.env.PORT || 3001; // Render inyecta el puerto aquí
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`🚀 BACKEND CORRIENDO EN PUERTO ${PORT}`);
+  console.log(`🚀 SERVIDOR LISTO EN PUERTO ${PORT}`);
 });
