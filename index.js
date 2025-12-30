@@ -2,7 +2,6 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-
 const { getRandomWord } = require('./data/dictionaries'); 
 
 const app = express();
@@ -11,15 +10,13 @@ app.use(cors());
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: "*", 
-    methods: ["GET", "POST"]
-  }
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  // Tiempos altos para tolerar móviles en segundo plano
+  pingTimeout: 60000, 
+  pingInterval: 25000 
 });
 
 const rooms = {}; 
-// Almacén para los temporizadores de desconexión (para evitar borrar gente por lag)
-const disconnectTimers = {}; 
 
 const generateRoomCode = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -37,136 +34,107 @@ io.on('connection', (socket) => {
   socket.on('create_room', ({ nickname, avatarConfig, settings }) => {
     const roomCode = generateRoomCode();
     
-    const maxPlayers = settings?.maxPlayers || 8;
-    const impostorCount = settings?.impostorCount || 1;
-    const categories = settings?.categories || ['random'];
-
+    // Inicializamos la sala, PERO NO AGREGAMOS AL JUGADOR AÚN.
+    // Esperamos a que el frontend haga 'join_room' inmediatamente después.
     rooms[roomCode] = {
       players: [],
       gameStarted: false,
-      hostId: socket.id,
-      config: { maxPlayers, allowedCategories: categories, impostorCount }
+      hostId: null, // Se asignará en join_room
+      config: { 
+        maxPlayers: settings?.maxPlayers || 10, 
+        impostorCount: settings?.impostorCount || 1,
+        allowedCategories: settings?.categories || ['random']
+      },
+      votes: {},
+      impostorIds: [],
+      currentWord: null,
+      currentRoundId: null
     };
 
-    const newPlayer = {
-      id: socket.id,
-      name: nickname || 'Jugador',
-      avatar: avatarConfig,
-      isHost: true,
-      score: 0,
-      connected: true // Rastreamos estado de conexión
-    };
-
-    rooms[roomCode].players.push(newPlayer);
-    socket.join(roomCode); 
-    // Guardamos la sala en el socket para facilitar la desconexión
-    socket.currentRoom = roomCode; 
-
-    socket.emit('room_created', { 
-        roomCode,
-        players: rooms[roomCode].players
-    });
-    console.log(`🏠 Sala ${roomCode} creada por ${nickname}`);
+    socket.emit('room_created', { roomCode });
+    console.log(`🏠 Sala ${roomCode} creada.`);
   });
 
-  // --- 2. UNIRSE A SALA (Con Lógica de Reconexión) ---
+  // --- 2. UNIRSE A SALA (LÓGICA UNIFICADA Y BLINDADA) ---
   socket.on('join_room', ({ roomCode, nickname, avatarConfig }) => {
     const code = roomCode?.toUpperCase();
+    const room = rooms[code];
 
-    if (!rooms[code]) {
+    if (!room) {
       socket.emit('error_message', 'La sala no existe ❌');
       return;
     }
 
-    const room = rooms[code];
-    // Buscamos si ya existe un jugador con ese nombre
-    const existingPlayerIndex = room.players.findIndex(p => p.name === nickname);
+    // A. RECONEXIÓN: ¿Ya existe alguien con este nombre?
+    const existingPlayer = room.players.find(p => p.name === nickname);
 
-    // --- ESCENARIO A: EL JUGADOR YA EXISTE (RECONEXIÓN) ---
-    if (existingPlayerIndex !== -1) {
-        const existingPlayer = room.players[existingPlayerIndex];
-
-        // Si es el mismo usuario volviendo, actualizamos su Socket ID
-        console.log(`♻️ ${nickname} se ha reconectado a ${code}`);
+    if (existingPlayer) {
+        console.log(`♻️ RECONEXIÓN: ${nickname} en ${code}`);
         
-        // 1. Cancelar el temporizador de borrado si existía
-        if (disconnectTimers[existingPlayer.id]) {
-            clearTimeout(disconnectTimers[existingPlayer.id]);
-            delete disconnectTimers[existingPlayer.id];
-        }
-
-        // 2. Actualizar ID y estado
-        existingPlayer.id = socket.id; // Actualizamos al nuevo ID
+        // Actualizamos socket ID
+        const oldSocketId = existingPlayer.id;
+        existingPlayer.id = socket.id; 
         existingPlayer.connected = true;
-        existingPlayer.avatar = avatarConfig; // Actualizamos avatar por si lo cambió
-        
-        // 3. Unir al socket a la sala
+        if (avatarConfig) existingPlayer.avatar = avatarConfig;
+
+        // Recuperar rol de Host si lo tenía
+        if (existingPlayer.isHost) room.hostId = socket.id;
+
         socket.join(code);
         socket.currentRoom = code;
-
-        // 4. Si era el host y perdió el rol, devolvérselo (opcional, simplificado aquí)
-        if (existingPlayer.isHost) {
-            room.hostId = socket.id;
-        }
-
-        // 5. Notificar a todos y enviar estado actual
+        
+        // Avisar a todos
         io.to(code).emit('update_players', room.players);
-        socket.emit('room_joined', { roomCode: code, players: room.players });
-
-        // SI LA PARTIDA YA EMPEZÓ, LE REENVIAMOS SU ROL
+        
+        // SI LA PARTIDA YA EMPEZÓ: Restaurar estado
         if (room.gameStarted) {
-             const isImpostor = room.impostorIds?.includes(socket.id) || room.impostorIds?.includes(existingPlayer.id); // Check robusto
-             
-             // Actualizamos lista de impostores con el nuevo ID si es necesario
-             if (room.impostorIds && room.impostorIds.includes(existingPlayer.id)) {
-                 // Reemplazar ID viejo por nuevo en la lista de impostores
-                 // (Esto requeriría lógica extra si guardas IDs fijos, pero para este ejemplo simple basta con reenviar los datos)
-             }
+            // Actualizar lista de impostores con el nuevo ID
+            if (room.impostorIds.includes(oldSocketId)) {
+                room.impostorIds = room.impostorIds.filter(id => id !== oldSocketId);
+                room.impostorIds.push(socket.id);
+            }
+            const isImpostor = room.impostorIds.includes(socket.id);
 
-             // Reconstruir payload secreto (simplificado)
-             // Nota: Para que esto sea perfecto, deberías guardar el 'role' en el objeto player también.
-             // Aquí asumimos reinicio de vista simple:
-             socket.emit('game_started', {
+            socket.emit('game_started', {
                 gameStarted: true,
-                role: 'recuperando...', // O idealmente guardar el rol en memory
-                location: room.currentWord,
-                category: 'Reconectado',
+                roundId: room.currentRoundId,
+                role: existingPlayer.role || (isImpostor ? 'impostor' : 'jugador'),
+                location: isImpostor ? '???' : room.currentWord,
+                category: room.categoryPlayed,
                 players: room.players,
-                isReconnection: true
-             });
+                impostorCount: room.config.impostorCount
+            });
         }
         return;
     }
 
-    // --- ESCENARIO B: JUGADOR NUEVO ---
-    
+    // B. NUEVO JUGADOR
     if (room.gameStarted) {
       socket.emit('error_message', 'La partida ya empezó 🚫');
       return;
     }
-    
-    if (room.players.length >= room.config.maxPlayers) {
-        socket.emit('error_message', '¡La sala está llena! 🌕');
-        return;
-    }
 
+    // Si es el primer jugador, es el Host
+    const isFirst = room.players.length === 0;
+    
     const newPlayer = {
       id: socket.id,
-      name: nickname, // Ya no necesitamos agregar (2) porque manejamos la reconexión arriba
+      name: nickname,
       avatar: avatarConfig,
-      isHost: false,
+      isHost: isFirst,
       score: 0,
-      connected: true
+      connected: true,
+      role: null
     };
+
+    if (isFirst) room.hostId = socket.id;
 
     room.players.push(newPlayer);
     socket.join(code);
     socket.currentRoom = code;
 
+    console.log(`➕ ${nickname} entró a ${code}`);
     io.to(code).emit('update_players', room.players);
-    socket.emit('room_joined', { roomCode: code, players: room.players });
-
-    console.log(`👋 ${nickname} entró a ${code}`);
   });
 
   // --- 3. INICIAR PARTIDA ---
@@ -175,120 +143,154 @@ io.on('connection', (socket) => {
     const room = rooms[code];
 
     if (!room || room.hostId !== socket.id) return;
-    
-    if (room.players.length < 3) { 
-        socket.emit('error_message', 'Se necesitan mínimo 3 jugadores.');
+    if (room.players.length < 3) {
+        socket.emit('error_message', 'Mínimo 3 jugadores requeridos.');
         return;
     }
 
+    // Actualizar configuración si viene del Setup
     if (config) {
         if (config.categories) room.config.allowedCategories = config.categories;
         if (config.impostors) room.config.impostorCount = config.impostors;
     }
 
+    // Elegir palabra
     const availableCats = room.config.allowedCategories; 
     let categoryToUse = 'random';
     if (availableCats.length > 0 && !availableCats.includes('random')) {
         categoryToUse = availableCats[Math.floor(Math.random() * availableCats.length)];
     }
-
     const { word, category } = getRandomWord(categoryToUse);
 
+    // Elegir impostores
     const totalPlayers = room.players.length;
     let desiredImpostors = room.config.impostorCount;
     const maxImpostors = Math.floor((totalPlayers - 1) / 2);
-    
     if (desiredImpostors > maxImpostors) desiredImpostors = maxImpostors;
     if (desiredImpostors < 1) desiredImpostors = 1;
 
     const shuffledIds = room.players.map(p => p.id).sort(() => 0.5 - Math.random());
     const selectedImpostorIds = shuffledIds.slice(0, desiredImpostors);
 
+    // Guardar estado
     room.gameStarted = true;
-    room.currentWord = word;        
+    room.currentWord = word;
+    room.categoryPlayed = category;
     room.impostorIds = selectedImpostorIds;
-    
-    const currentRoundId = Date.now();
+    room.currentRoundId = Date.now();
+    room.votes = {};
 
-    console.log(`🎮 Start ${code}: ${word} (${category}) | Impostores: ${desiredImpostors}`);
+    console.log(`🎮 Start ${code}: ${word} | Impostores: ${desiredImpostors}`);
 
+    // Repartir roles
     room.players.forEach(player => {
       const isImpostor = selectedImpostorIds.includes(player.id);
-      // Guardamos el rol en el jugador por si se reconecta
       player.role = isImpostor ? 'impostor' : 'jugador';
 
-      const secretPayload = {
+      io.to(player.id).emit('game_started', {
         gameStarted: true,
-        roundId: currentRoundId,
+        roundId: room.currentRoundId,
         role: player.role,
-        location: isImpostor ? '???' : word, 
+        location: isImpostor ? '???' : word,
         category: category,
         players: room.players,
-        impostorCount: desiredImpostors 
-      };
-      
-      io.to(player.id).emit('game_started', secretPayload);
+        impostorCount: desiredImpostors
+      });
     });
   });
 
+  // --- 4. INICIAR DEBATE ---
   socket.on('start_debate', ({ roomCode }) => {
     const code = roomCode?.toUpperCase();
-    io.to(code).emit('debate_started');
+    const room = rooms[code];
+    if (room && room.players) {
+        room.votes = {}; 
+        room.players.forEach(p => io.to(p.id).emit('debate_started'));
+    }
   });
 
-  // --- 4. DESCONEXIÓN SEGURA ---
+  // --- 5. VOTACIÓN ---
+  socket.on('vote_player', ({ roomCode, votedId }) => {
+    const code = roomCode?.toUpperCase();
+    const room = rooms[code];
+    if (!room || !room.gameStarted) return;
+
+    room.votes[socket.id] = votedId;
+
+    const totalVotes = Object.keys(room.votes).length;
+    const activePlayers = room.players.filter(p => p.connected).length; // Solo contamos conectados
+
+    console.log(`🗳️ Votos en ${code}: ${totalVotes}/${activePlayers}`);
+
+    if (totalVotes >= activePlayers) {
+        // Conteo
+        const counts = {};
+        let maxVotes = 0;
+        let mostVotedId = null;
+        let isTie = false;
+
+        Object.values(room.votes).forEach(targetId => {
+            counts[targetId] = (counts[targetId] || 0) + 1;
+            if (counts[targetId] > maxVotes) {
+                maxVotes = counts[targetId];
+                mostVotedId = targetId;
+                isTie = false;
+            } else if (counts[targetId] === maxVotes) {
+                isTie = true;
+            }
+        });
+
+        // Lógica de Ganador
+        const impostorCaught = !isTie && room.impostorIds.includes(mostVotedId);
+        
+        const results = {
+            impostorCaught,
+            mostVotedPlayer: room.players.find(p => p.id === mostVotedId) || null,
+            impostors: room.players.filter(p => room.impostorIds.includes(p.id)),
+            isTie,
+            votesDetail: counts
+        };
+
+        room.players.forEach(p => io.to(p.id).emit('voting_results', results));
+    }
+  });
+
+  // --- 6. SALIDA VOLUNTARIA ---
+  socket.on('disconnect_game', () => {
+    const code = socket.currentRoom;
+    if (rooms[code]) {
+        const pIndex = rooms[code].players.findIndex(p => p.id === socket.id);
+        if (pIndex !== -1) {
+            console.log(`👋 ${rooms[code].players[pIndex].name} salió.`);
+            rooms[code].players.splice(pIndex, 1);
+            
+            if (rooms[code].players.length === 0) {
+                delete rooms[code];
+            } else {
+                // Reasignar host si se fue el host
+                if (!rooms[code].players.some(p => p.isHost)) {
+                    rooms[code].players[0].isHost = true;
+                    rooms[code].hostId = rooms[code].players[0].id;
+                }
+                io.to(code).emit('update_players', rooms[code].players);
+            }
+        }
+    }
+    socket.disconnect();
+  });
+
+  // --- 7. DESCONEXIÓN INVOLUNTARIA (NO BORRAR) ---
   socket.on('disconnect', () => {
     const code = socket.currentRoom;
-    if (!code || !rooms[code]) return;
-
-    const room = rooms[code];
-    const player = room.players.find(p => p.id === socket.id);
-
-    if (player) {
-        console.log(`⚠️ ${player.name} perdió conexión. Esperando reconexión...`);
-        player.connected = false;
-        
-        // Notificamos visualmente que alguien se cayó (opcional, si el frontend lo soporta)
-        io.to(code).emit('update_players', room.players);
-
-        // INICIAMOS TEMPORIZADOR DE 15 SEGUNDOS
-        // Si no vuelve en 15s, lo borramos de verdad.
-        disconnectTimers[socket.id] = setTimeout(() => {
-            if (!rooms[code]) return; // La sala ya murió
-
-            // Verificar si sigue desconectado (por si acaso)
-            const pIndex = room.players.findIndex(p => p.id === socket.id);
-            if (pIndex !== -1 && !room.players[pIndex].connected) {
-                console.log(`🗑️ Eliminando a ${player.name} por inactividad.`);
-                
-                const wasHost = room.players[pIndex].isHost;
-                room.players.splice(pIndex, 1);
-
-                if (room.players.length === 0) {
-                    delete rooms[code];
-                    console.log(`💀 Sala ${code} eliminada.`);
-                } else {
-                    if (wasHost) {
-                        room.players[0].isHost = true;
-                        room.hostId = room.players[0].id;
-                    }
-                    io.to(code).emit('update_players', room.players);
-                }
-            }
-            delete disconnectTimers[socket.id];
-        }, 6000000); // 15 segundos de gracia
+    if (rooms[code]) {
+        const player = rooms[code].players.find(p => p.id === socket.id);
+        if (player) {
+            console.log(`⚠️ ${player.name} desconectado (mantenemos sesión).`);
+            player.connected = false;
+            io.to(code).emit('update_players', rooms[code].players);
+            // NO BORRAMOS. Así pueden reconectarse infinitamente.
+        }
     }
-  });
-
-  socket.on('disconnect_game', () => {
-    // Si el usuario da click en "Salir", borramos inmediatamente sin esperar
-    const code = socket.currentRoom;
-    if(code && rooms[code]) {
-        // Limpiamos lógica manual aquí si fuera necesario, 
-        // pero socket.disconnect() disparará el evento de arriba.
-        // Para diferenciar "salir voluntario" de "caída", podrías enviar un flag.
-    }
-    socket.disconnect(); 
   });
 });
 
