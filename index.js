@@ -155,7 +155,8 @@ io.on('connection', (socket) => {
       
       const secretPayload = {
         gameStarted: true,
-        role: isImpostor ? 'impostor' : 'jugador', // Corregido typo 'juagador'
+        roundId: Date.now(), // <--- AGREGA ESTA LÍNEA (Genera un ID único por tiempo)
+        role: isImpostor ? 'impostor' : 'jugador', 
         location: isImpostor ? '???' : word, 
         category: category,
         players: room.players,
