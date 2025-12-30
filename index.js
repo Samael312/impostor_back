@@ -2,8 +2,8 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-
-const { getRandomword } = require('./data/dictionaries'); 
+// Asegúrate de que tu archivo dictionaries exporte esto correctamente
+const { getRandomword, DICTIONARIES } = require('./data/dictionaries'); 
 
 const app = express();
 app.use(cors());
@@ -17,8 +17,9 @@ const io = new Server(server, {
   }
 });
 
-// BASE DE DATOS EN MEMORIA
+// VARIABLES GLOBALES
 const rooms = {}; 
+let userCounter = 0; 
 
 const generateRoomCode = () => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -30,20 +31,32 @@ const generateRoomCode = () => {
 };
 
 io.on('connection', (socket) => {
-  console.log(`Usuario conectado: ${socket.id}`);
+  // --- 1. LOG PERSONALIZADO ---
+  userCounter++;
+  const randomId = Math.random().toString(36).substr(2, 5); 
+  const customLogId = `Usuario${userCounter}_${randomId}`;
+  
+  socket.customLogId = customLogId; 
+  console.log(`🟢 Conectado: ${customLogId}`);
 
-  // 1. CREAR SALA
-  socket.on('create_room', ({ nickname, avatarConfig }) => {
+  // --- 2. CREAR SALA (Con Configuración de Impostores) ---
+  socket.on('create_room', ({ nickname, avatarConfig, settings }) => {
     const roomCode = generateRoomCode();
     
-    // Inicializamos la sala
+    // settings trae: { categories, maxPlayers, impostorCount }
+    
     rooms[roomCode] = {
       players: [],
       gameStarted: false,
-      hostId: socket.id // Guardamos quién es el jefe
+      hostId: socket.id,
+      config: {
+        maxPlayers: settings.maxPlayers || 10,
+        allowedCategories: settings.categories || ['random'],
+        // NUEVO: Guardamos cuántos impostores quiere el host
+        impostorCount: settings.impostorCount || 1 
+      }
     };
 
-    // Creamos el objeto del jugador anfitrión
     const newPlayer = {
       id: socket.id,
       name: nickname,
@@ -55,26 +68,31 @@ io.on('connection', (socket) => {
     rooms[roomCode].players.push(newPlayer);
     socket.join(roomCode); 
 
-    // Respondemos al cliente
-    socket.emit('room_created', { roomCode, players: rooms[roomCode].players });
-    console.log(`Sala ${roomCode} creada por ${nickname}`);
+    socket.emit('room_created', { 
+        roomCode: roomCode,
+        players: rooms[roomCode].players
+    });
+    console.log(`🏠 Sala ${roomCode} creada (Max: ${settings.maxPlayers}, Impostores: ${settings.impostorCount})`);
   });
 
-  // 2. UNIRSE A SALA
+  // --- 3. UNIRSE A SALA ---
   socket.on('join_room', ({ roomCode, nickname, avatarConfig }) => {
     const code = roomCode?.toUpperCase();
 
-    // Validaciones
     if (!rooms[code]) {
-      socket.emit('error_message', 'La sala no existe');
+      socket.emit('error_message', 'La sala no existe ❌');
       return;
     }
     if (rooms[code].gameStarted) {
-      socket.emit('error_message', 'La partida ya empezó');
+      socket.emit('error_message', 'La partida ya empezó 🚫');
       return;
     }
+    
+    if (rooms[code].players.length >= rooms[code].config.maxPlayers) {
+        socket.emit('error_message', '¡La sala está llena! 🌕');
+        return;
+    }
 
-    // Crear al jugador invitado
     const newPlayer = {
       id: socket.id,
       name: nickname,
@@ -86,80 +104,82 @@ io.on('connection', (socket) => {
     rooms[code].players.push(newPlayer);
     socket.join(code);
 
-    // CORRECCIÓN IMPORTANTE AQUÍ:
-    // 1. Avisar a TODOS (update_players) para actualizar la lista visual
     io.to(code).emit('update_players', rooms[code].players);
-    
-    // 2. Avisar al que entra (room_joined) para que su navegador cambie de página
     socket.emit('room_joined', { roomCode: code, players: rooms[code].players });
 
-    console.log(`${nickname} se unió a la sala ${code}`);
+    console.log(`👋 ${customLogId} entró a sala ${code}`);
   });
 
-  // 3. INICIAR PARTIDA
-  socket.on('start_game', ({ roomCode, categoryId }) => {
+  // --- 4. INICIAR PARTIDA (Lógica Multi-Impostor) ---
+  socket.on('start_game', ({ roomCode }) => {
     const code = roomCode?.toUpperCase();
     const room = rooms[code];
 
-    // Validaciones de seguridad
-    if (!room) return;
-    if (room.hostId !== socket.id) return; // Solo el host inicia
+    if (!room || room.hostId !== socket.id) return;
     
-    // OJO: Para pruebas puedes bajar esto a 2, pero lo ideal es 3
-    if (room.players.length < 3) {
+    // Validación mínima de jugadores (3 es lo normal, pero puedes bajarlo para pruebas)
+    if (room.players.length < 3) { 
         socket.emit('error_message', 'Mínimo 3 jugadores para empezar.');
         return;
     }
 
-    // Configurar datos de la partida
-    const { word, category } = getRandomword(categoryId || 'random');
-    const impostorIndex = Math.floor(Math.random() * room.players.length);
-    const impostorId = room.players[impostorIndex].id;
+    // A. SELECCIONAR TEMA
+    const availableCategories = room.config.allowedCategories;
+    const randomCatKey = availableCategories[Math.floor(Math.random() * availableCategories.length)];
+    
+    // (Asegúrate de que getRandomword devuelva { word, category })
+    const { word, category } = getRandomword(randomCatKey);
+
+    // B. SELECCIONAR IMPOSTORES (NUEVA LÓGICA)
+    const totalPlayers = room.players.length;
+    // Recuperamos la configuración, o usamos 1 por defecto
+    let count = room.config.impostorCount || 1;
+
+    // Seguridad: Que los impostores no sean más de la mitad (por si acaso falla el frontend)
+    const maxAllowed = Math.floor((totalPlayers - 1) / 2) || 1; 
+    if (count > maxAllowed) count = maxAllowed;
+
+    // Algoritmo de mezcla (Shuffle) para elegir N jugadores al azar
+    const shuffledIds = room.players.map(p => p.id).sort(() => 0.5 - Math.random());
+    const selectedImpostorIds = shuffledIds.slice(0, count); // Tomamos los primeros N IDs
 
     room.gameStarted = true;
     room.word = word;       
-    room.impostorId = impostorId;   
+    room.impostorIds = selectedImpostorIds; // Guardamos ARRAY de IDs, no solo uno
     room.categoryPlayed = category; 
 
-    console.log(`Partida iniciada en ${code}. Palabra: ${word}. Impostor: ${room.players[impostorIndex].name}`);
+    console.log(`🎮 Partida en ${code} | Tema: ${category} | Impostores: ${count}`);
 
-    // REPARTO DE ROLES SECRETO
+    // C. ENVIAR ROLES A CADA JUGADOR
     room.players.forEach(player => {
-      const isImpostor = player.id === impostorId;
+      // Verificamos si este jugador está en la lista de impostores seleccionados
+      const isImpostor = selectedImpostorIds.includes(player.id);
       
       const secretPayload = {
         gameStarted: true,
-        role: isImpostor ? 'impostor' : 'jugador',
-        word: isImpostor ? '???' : word, // El impostor no ve la palabra
+        role: isImpostor ? 'impostor' : 'civil', // Usamos 'civil' o 'jugador' según prefieras
+        word: isImpostor ? '???' : word,
         category: category,
-        players: room.players
+        players: room.players,
+        impostorCount: count // Opcional: Avisar a todos cuántos impostores hay
       };
-
-      // Enviamos el mensaje SOLO a ese socket específico
+      
       io.to(player.id).emit('game_started', secretPayload);
     });
   });
   
-  // 4. DESCONEXIÓN (CORREGIDO)
+  // --- 5. DESCONEXIÓN ---
   socket.on('disconnect', () => {
-    console.log(`Usuario desconectado: ${socket.id}`);
-    
-    // Buscar en todas las salas y borrar al jugador
+    console.log(`🔴 Desconectado: ${socket.customLogId || socket.id}`);
     for (const code in rooms) {
       const room = rooms[code];
       const index = room.players.findIndex(p => p.id === socket.id);
       
       if (index !== -1) {
-        // Borrar jugador
         room.players.splice(index, 1);
-        
-        // Si la sala se vacía, la borramos
         if (room.players.length === 0) {
           delete rooms[code];
-          console.log(`Sala ${code} eliminada (vacía)`);
         } else {
-          // Si quedan jugadores, actualizamos su lista
-          // Si el host se fue, asignamos uno nuevo (el primero de la lista)
           if (room.hostId === socket.id) {
              room.hostId = room.players[0].id;
              room.players[0].isHost = true;
@@ -173,5 +193,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(3001, () => {
-  console.log('BACKEND LISTO CON DICCIONARIOS EN PUERTO 3001');
+  console.log('🚀 BACKEND CORRIENDO EN PUERTO 3001');
 });
