@@ -20,7 +20,7 @@ const io = new Server(server, {
   }
 });
 
-// ALMACÉN EN MEMORIA (Volátil: se borra si reinicias el servidor)
+// ALMACÉN EN MEMORIA
 const rooms = {}; 
 
 const generateRoomCode = () => {
@@ -80,7 +80,7 @@ io.on('connection', (socket) => {
       socket.emit('error_message', 'La sala no existe ❌');
       return;
     }
-    // Si la partida ya empezó, no dejamos entrar (o podrías manejar reconexión aquí)
+    // Opcional: Impedir entrada si ya empezó, o manejar reconexión
     if (rooms[code].gameStarted) {
       socket.emit('error_message', 'La partida ya empezó 🚫');
       return;
@@ -111,8 +111,8 @@ io.on('connection', (socket) => {
     console.log(`👋 ${nickname} entró a ${code}`);
   });
 
-  // --- 3. INICIAR PARTIDA ---
-  socket.on('start_game', ({ roomCode }) => {
+  // --- 3. INICIAR PARTIDA (CORREGIDO PARA NUEVAS RONDAS) ---
+  socket.on('start_game', ({ roomCode, config }) => { // Recibimos config opcional
     const code = roomCode?.toUpperCase();
     const room = rooms[code];
 
@@ -121,6 +121,13 @@ io.on('connection', (socket) => {
     if (room.players.length < 3) { 
         socket.emit('error_message', 'Se necesitan mínimo 3 jugadores.');
         return;
+    }
+
+    // --- ACTUALIZAR CONFIG SI VIENE DE SETUPGAME ---
+    if (config) {
+        console.log(`⚙️ Actualizando config sala ${code}:`, config);
+        if (config.categories) room.config.allowedCategories = config.categories;
+        if (config.impostors) room.config.impostorCount = config.impostors;
     }
 
     // A. SELECCIONAR PALABRA
@@ -146,6 +153,9 @@ io.on('connection', (socket) => {
     room.gameStarted = true;
     room.currentWord = word;        
     room.impostorIds = selectedImpostorIds;
+    
+    // GENERAR ID ÚNICO DE RONDA (Vital para el frontend)
+    const currentRoundId = Date.now();
 
     console.log(`🎮 Start ${code}: ${word} (${category}) | Impostores: ${desiredImpostors}`);
 
@@ -155,8 +165,8 @@ io.on('connection', (socket) => {
       
       const secretPayload = {
         gameStarted: true,
-        roundId: Date.now(), // <--- AGREGA ESTA LÍNEA (Genera un ID único por tiempo)
-        role: isImpostor ? 'impostor' : 'jugador', 
+        roundId: currentRoundId, // <--- ESTO FUERZA EL REFRESCO EN EL FRONTEND
+        role: isImpostor ? 'impostor' : 'jugador',
         location: isImpostor ? '???' : word, 
         category: category,
         players: room.players,
@@ -167,19 +177,18 @@ io.on('connection', (socket) => {
     });
   });
 
-  // --- 5. INICIAR DEBATE (VERSIÓN ROBUSTA) ---
+  // --- 5. INICIAR DEBATE ---
   socket.on('start_debate', ({ roomCode }) => {
     const code = roomCode?.toUpperCase();
     const room = rooms[code];
 
     if (room && room.players) {
-        // Enviar a cada jugador individualmente para asegurar que llegue a todos
+        // Enviar uno a uno para asegurar recepción
         room.players.forEach(player => {
             io.to(player.id).emit('debate_started');
         });
-        console.log(`🗣️ Debate iniciado en sala ${code} (Enviado a ${room.players.length} jugadores)`);
+        console.log(`🗣️ Debate iniciado en sala ${code}`);
     } else {
-        // Fallback
         io.to(code).emit('debate_started');
     }
   });
