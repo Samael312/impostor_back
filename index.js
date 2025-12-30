@@ -3,9 +3,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
 
-// --- IMPORTAMOS EL DICCIONARIO ---
-// Asegúrate de que la ruta sea correcta: backend/data/dictionaries.js
-const { getRandomLocation } = require('./data/dictionaries'); 
+const { getRandomword } = require('./data/dictionaries'); 
 
 const app = express();
 app.use(cors());
@@ -114,16 +112,16 @@ io.on('connection', (socket) => {
     }
 
     // Configurar datos de la partida
-    const { location, category } = getRandomLocation(categoryId || 'random');
+    const { word, category } = getRandomword(categoryId || 'random');
     const impostorIndex = Math.floor(Math.random() * room.players.length);
     const impostorId = room.players[impostorIndex].id;
 
     room.gameStarted = true;
-    room.location = location;       
+    room.word = word;       
     room.impostorId = impostorId;   
     room.categoryPlayed = category; 
 
-    console.log(`Partida iniciada en ${code}. Lugar: ${location}. Impostor: ${room.players[impostorIndex].name}`);
+    console.log(`Partida iniciada en ${code}. Palabra: ${word}. Impostor: ${room.players[impostorIndex].name}`);
 
     // REPARTO DE ROLES SECRETO
     room.players.forEach(player => {
@@ -131,8 +129,8 @@ io.on('connection', (socket) => {
       
       const secretPayload = {
         gameStarted: true,
-        role: isImpostor ? 'impostor' : 'civil',
-        location: isImpostor ? '???' : location, // El impostor no ve el lugar
+        role: isImpostor ? 'impostor' : 'jugador',
+        word: isImpostor ? '???' : word, // El impostor no ve la palabra
         category: category,
         players: room.players
       };

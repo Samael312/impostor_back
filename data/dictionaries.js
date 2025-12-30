@@ -63,7 +63,7 @@ const DICTIONARIES = {
 
 
 // Función para obtener una palabra aleatoria según categoría
-const getRandomLocation = (category = 'random') => {
+const getRandomWord = (category = 'random') => {
   // Si la categoría no existe o es 'random', elegimos una clave al azar
   let selectedCategory = category;
   const keys = Object.keys(DICTIONARIES);
@@ -73,9 +73,9 @@ const getRandomLocation = (category = 'random') => {
   }
 
   const wordList = DICTIONARIES[selectedCategory];
-  const location = wordList[Math.floor(Math.random() * wordList.length)];
+  const word = wordList[Math.floor(Math.random() * wordList.length)];
 
-  return { location, category: selectedCategory };
+  return { word, category: selectedCategory };
 };
 
-module.exports = { DICTIONARIES, getRandomLocation };
+module.exports = { DICTIONARIES, getRandomWord };
