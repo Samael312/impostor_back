@@ -4,7 +4,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 
 // --- IMPORTANTE: Asegúrate de que la carpeta 'data' y el archivo 'dictionaries.js' estén en GitHub ---
-const { getRandomword, DICTIONARIES } = require('./data/dictionaries'); 
+const {  DICTIONARIES, getRandomWord } = require('./data/dictionaries'); 
 
 const app = express();
 app.use(cors());
@@ -131,7 +131,7 @@ io.on('connection', (socket) => {
     const availableCategories = room.config.allowedCategories;
     const randomCatKey = availableCategories[Math.floor(Math.random() * availableCategories.length)];
     
-    const { word, category } = getRandomword(randomCatKey);
+    const { word, category } = getRandomWord(randomCatKey);
 
     // B. SELECCIONAR IMPOSTORES
     const totalPlayers = room.players.length;
