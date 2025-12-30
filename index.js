@@ -276,7 +276,7 @@ io.on('connection', (socket) => {
                 }
             }
             delete disconnectTimers[socket.id];
-        }, 15000); // 15 segundos de gracia
+        }, 6000000); // 15 segundos de gracia
     }
   });
 
